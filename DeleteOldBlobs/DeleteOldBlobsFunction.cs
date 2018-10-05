@@ -88,46 +88,54 @@ namespace DeleteOldBlobsFunction
                                 BlobContinuationToken containerEnumerationToken = null;
                                 do
                                 {
-                                    var response = await blobClient.ListContainersSegmentedAsync(continuationToken: containerEnumerationToken);
-                                    containerEnumerationToken = response.ContinuationToken;
-                                    foreach (var container in response.Results)
+                                    try
                                     {
-                                        try
+                                        var response = await blobClient.ListContainersSegmentedAsync(continuationToken: containerEnumerationToken);
+                                        containerEnumerationToken = response.ContinuationToken;
+                                        foreach (var container in response.Results)
                                         {
-                                            log.LogInformation($"Found {account.Name}/{container.Name}");
-                                            if (!IsBackupContainerName(container)) { continue; }
-
-                                            var containerReference = blobClient.GetContainerReference(containerName: container.Name);
-                                            BlobContinuationToken blobEnumerationToken = null;
-                                            do
+                                            try
                                             {
-                                                var blobResponse = await containerReference.ListBlobsSegmentedAsync(currentToken: blobEnumerationToken, cancellationToken: ct);
-                                                blobEnumerationToken = blobResponse.ContinuationToken;
-                                                foreach (var blob in blobResponse.Results)
-                                                {
-                                                    try
-                                                    {
-                                                        log.LogInformation($"Found blob {blob.Uri}");
-                                                        var reference = await blobClient.GetBlobReferenceFromServerAsync(blobUri: blob.Uri);
-                                                        if (!IsBackupBlob(reference)) { continue; }
+                                                log.LogInformation($"Found {account.Name}/{container.Name}");
+                                                if (!IsBackupContainerName(container)) { continue; }
 
-                                                        if (ShouldBeDeleted(reference, log))
+                                                var containerReference = blobClient.GetContainerReference(containerName: container.Name);
+                                                BlobContinuationToken blobEnumerationToken = null;
+                                                do
+                                                {
+                                                    var blobResponse = await containerReference.ListBlobsSegmentedAsync(currentToken: blobEnumerationToken, cancellationToken: ct);
+                                                    blobEnumerationToken = blobResponse.ContinuationToken;
+                                                    foreach (var blob in blobResponse.Results)
+                                                    {
+                                                        try
                                                         {
-                                                            log.LogInformation($"Delete blob {blob.Uri}");
+                                                            log.LogInformation($"Found blob {blob.Uri}");
+                                                            var reference = await blobClient.GetBlobReferenceFromServerAsync(blobUri: blob.Uri);
+                                                            if (!IsBackupBlob(reference)) { continue; }
+
+                                                            if (ShouldBeDeleted(reference, log))
+                                                            {
+                                                                log.LogInformation($"Delete blob {blob.Uri}");
+                                                                // await reference.DeleteIfExistsAsync();
+                                                            }
+                                                        }
+                                                        catch (Exception blobException)
+                                                        {
+                                                            log.LogError($"{blobException.GetType().FullName} while processing blob {blob.Uri.AbsoluteUri}: \"{blobException.Message}\" - {blobException.StackTrace}");
                                                         }
                                                     }
-                                                    catch (Exception blobException)
-                                                    {
-                                                        log.LogError($"{blobException.GetType().FullName} while processing blob {blob.Uri.AbsoluteUri}: \"{blobException.Message}\" - {blobException.StackTrace}");
-                                                    }
                                                 }
+                                                while (blobEnumerationToken != null);
                                             }
-                                            while (blobEnumerationToken != null);
+                                            catch (Exception containerException)
+                                            {
+                                                log.LogError($"{containerException.GetType().FullName} while processing account {account.Name} container {container.Name}: \"{containerException.Message}\" - {containerException.StackTrace}");
+                                            }
                                         }
-                                        catch (Exception containerException)
-                                        {
-                                            log.LogError($"{containerException.GetType().FullName} while processing account {account.Name} container {container.Name}: \"{containerException.Message}\" - {containerException.StackTrace}");
-                                        }
+                                    }
+                                    catch (Exception listContainerException)
+                                    {
+                                        log.LogError($"{listContainerException.GetType().FullName} while processing listing containers in {account.Name}.{endpointSuffix}: \"{listContainerException.Message}\" - {listContainerException.StackTrace}");
                                     }
                                 }
                                 while (containerEnumerationToken != null);
