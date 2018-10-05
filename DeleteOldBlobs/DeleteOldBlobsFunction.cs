@@ -20,7 +20,7 @@ namespace DeleteOldBlobsFunction
     {
         private static bool IsBackupSubscription(Subscription subscription) => true;
         private static bool IsBackupResourceGroup(ResourceGroupExtended group) => true;
-        private static bool IsBackupStorageAccount(StorageAccount storageAccount) => storageAccount.Name.StartsWith("sadjfksjlahfkj"); // storageAccount.Name.StartsWith("backup");
+        private static bool IsBackupStorageAccount(StorageAccount storageAccount) => true; // storageAccount.Name.StartsWith("sadjfksjlahfkj"); // storageAccount.Name.StartsWith("backup");
         private static bool IsBackupContainerName(CloudBlobContainer container) => true; // container.Name.Contains("hec");
         private static bool IsBackupBlob(ICloudBlob blob) => true;
 
