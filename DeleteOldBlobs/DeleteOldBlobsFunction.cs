@@ -27,7 +27,10 @@ namespace DeleteOldBlobsFunction
         private static bool ShouldBeDeleted(ICloudBlob blob, ILogger log)
         {
             var age = DateTime.UtcNow - blob.Properties.Created.Value;
-            return TimeSpan.FromDays(30) < age;
+            var shouldBeDeleted = TimeSpan.FromDays(30) < age;
+            var msg = shouldBeDeleted ? "should be deleted" : "should not be deleted";
+            log.LogInformation($"{blob.Uri.AbsoluteUri} is {(int) age.Days} days old and {msg}");
+            return shouldBeDeleted;
         }
 
         [FunctionName("DeleteOldBlobsFunction46")]
@@ -36,17 +39,12 @@ namespace DeleteOldBlobsFunction
             var cts = new CancellationTokenSource();
             CancellationToken ct = cts.Token;
 
-            //HttpClient client = new HttpClient();
-            //client.DefaultRequestHeaders.Add("Secret", Environment.GetEnvironmentVariable("MSI_SECRET"));
-            //var t = await client.GetAsync($"{Environment.GetEnvironmentVariable("MSI_ENDPOINT")}/?resource={resource}&api-version={apiversion}");
             try
             {
                 log.LogInformation($"C# Timer trigger function executed at: {DateTime.Now}");
                 var azureServiceTokenProvider = new AzureServiceTokenProvider();
                 var msiArmTokenString = await azureServiceTokenProvider.GetAccessTokenAsync(
-                    resource: "https://management.core.windows.net/"
-                    // , tenantId: "xxxxxx.onmicrosoft.com");
-                    ); 
+                    resource: "https://management.core.windows.net/"); 
                 var tokenCloudCredential = new TokenCloudCredentials(token: msiArmTokenString);
                 var subscriptionClient = new SubscriptionClient(credentials: tokenCloudCredential);
 
@@ -63,20 +61,6 @@ namespace DeleteOldBlobsFunction
                         var subscriptionCredential = new TokenCloudCredentials(
                             subscriptionId: subscription.SubscriptionId, token: msiArmTokenString);
                         log.LogInformation($"subscriptionCredential {subscriptionCredential.ToString()}");
-
-                        //var resourceMgmtClient = new Microsoft.Azure.Management.Resources.ResourceManagementClient(credentials: subscriptionCredential);
-                        //var resourceGroupResponse = await resourceMgmtClient.ResourceGroups.ListAsync(
-                        //    parameters: new ResourceGroupListParameters(), cancellationToken: ct);
-                        //string resourceGroupContinuationToken = null;
-                        //do
-                        //{
-                        //    foreach (var group in resourceGroupResponse.ResourceGroups)
-                        //    {
-                        //        log.LogInformation($"Resource Group {group.Name}");
-                        //        if (!IsBackupResourceGroup(group)) { continue; }
-                        //    }
-                        //    resourceGroupContinuationToken = resourceGroupResponse.NextLink;
-                        //} while (!string.IsNullOrEmpty(resourceGroupContinuationToken));
 
                         var client = new StorageManagementClient(credentials: subscriptionCredential);
                         log.LogInformation("Created StorageManagementClient");
