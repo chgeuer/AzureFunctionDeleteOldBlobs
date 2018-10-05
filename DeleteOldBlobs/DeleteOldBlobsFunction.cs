@@ -29,7 +29,7 @@ namespace DeleteOldBlobsFunction
             var age = DateTime.UtcNow - blob.Properties.Created.Value;
             var shouldBeDeleted = TimeSpan.FromDays(30) < age;
             var msg = shouldBeDeleted ? "should be deleted" : "should not be deleted";
-            log.LogInformation($"{blob.Uri.AbsoluteUri} is {(int) age.Days} days old and {msg}");
+            log.LogInformation($"{blob.Uri.AbsoluteUri} is {(int)age.Days} days old and {msg}");
             return shouldBeDeleted;
         }
 
@@ -44,7 +44,7 @@ namespace DeleteOldBlobsFunction
                 log.LogInformation($"C# Timer trigger function executed at: {DateTime.Now}");
                 var azureServiceTokenProvider = new AzureServiceTokenProvider();
                 var msiArmTokenString = await azureServiceTokenProvider.GetAccessTokenAsync(
-                    resource: "https://management.core.windows.net/"); 
+                    resource: "https://management.core.windows.net/");
                 var tokenCloudCredential = new TokenCloudCredentials(token: msiArmTokenString);
                 var subscriptionClient = new SubscriptionClient(credentials: tokenCloudCredential);
 
@@ -71,51 +71,71 @@ namespace DeleteOldBlobsFunction
                             log.LogInformation($"Found storage account: {account.Name}");
                             if (!IsBackupStorageAccount(account)) { continue; }
 
-                            var endpointSuffix = "core.windows.net";
-                            var storageTokenString = await azureServiceTokenProvider.GetAccessTokenAsync(
-                                resource: $"https://{account.Name}.blob.{endpointSuffix}/");
-
-                            var storageToken = new StorageCredentials(
-                                tokenCredential: new TokenCredential(initialToken: storageTokenString));
-
-                            var storageAccount = new CloudStorageAccount(
-                                storageCredentials: storageToken, accountName: account.Name, 
-                                endpointSuffix: endpointSuffix, useHttps: true);
-
-                            var blobClient = storageAccount.CreateCloudBlobClient();
-                            BlobContinuationToken containerEnumerationToken = null;
-                            do
+                            try
                             {
-                                var response = await blobClient.ListContainersSegmentedAsync(continuationToken: containerEnumerationToken);
-                                containerEnumerationToken = response.ContinuationToken;
-                                foreach (var container in response.Results)
+                                var endpointSuffix = "core.windows.net";
+                                var storageTokenString = await azureServiceTokenProvider.GetAccessTokenAsync(
+                                    resource: $"https://{account.Name}.blob.{endpointSuffix}/");
+
+                                var storageToken = new StorageCredentials(
+                                    tokenCredential: new TokenCredential(initialToken: storageTokenString));
+
+                                var storageAccount = new CloudStorageAccount(
+                                    storageCredentials: storageToken, accountName: account.Name,
+                                    endpointSuffix: endpointSuffix, useHttps: true);
+
+                                var blobClient = storageAccount.CreateCloudBlobClient();
+                                BlobContinuationToken containerEnumerationToken = null;
+                                do
                                 {
-                                    log.LogInformation($"Found {account.Name}/{container.Name}");
-                                    if (!IsBackupContainerName(container)) { continue; }
-
-                                    var containerReference = blobClient.GetContainerReference(containerName: container.Name);
-                                    BlobContinuationToken blobEnumerationToken = null;
-                                    do
+                                    var response = await blobClient.ListContainersSegmentedAsync(continuationToken: containerEnumerationToken);
+                                    containerEnumerationToken = response.ContinuationToken;
+                                    foreach (var container in response.Results)
                                     {
-                                        var blobResponse = await containerReference.ListBlobsSegmentedAsync(
-                                            currentToken: blobEnumerationToken, cancellationToken: ct);
-                                        blobEnumerationToken = blobResponse.ContinuationToken;
-                                        foreach (var blob in blobResponse.Results)
+                                        try
                                         {
-                                            log.LogInformation($"Found blob {blob.Uri}");
-                                            var reference = await blobClient.GetBlobReferenceFromServerAsync(blobUri: blob.Uri);
-                                            if (!IsBackupBlob(reference)) { continue; }
+                                            log.LogInformation($"Found {account.Name}/{container.Name}");
+                                            if (!IsBackupContainerName(container)) { continue; }
 
-                                            if (ShouldBeDeleted(reference, log))
+                                            var containerReference = blobClient.GetContainerReference(containerName: container.Name);
+                                            BlobContinuationToken blobEnumerationToken = null;
+                                            do
                                             {
-                                                log.LogInformation($"Delete blob {blob.Uri}");
+                                                var blobResponse = await containerReference.ListBlobsSegmentedAsync(currentToken: blobEnumerationToken, cancellationToken: ct);
+                                                blobEnumerationToken = blobResponse.ContinuationToken;
+                                                foreach (var blob in blobResponse.Results)
+                                                {
+                                                    try
+                                                    {
+                                                        log.LogInformation($"Found blob {blob.Uri}");
+                                                        var reference = await blobClient.GetBlobReferenceFromServerAsync(blobUri: blob.Uri);
+                                                        if (!IsBackupBlob(reference)) { continue; }
+
+                                                        if (ShouldBeDeleted(reference, log))
+                                                        {
+                                                            log.LogInformation($"Delete blob {blob.Uri}");
+                                                        }
+                                                    }
+                                                    catch (Exception blobException)
+                                                    {
+                                                        log.LogError($"{blobException.GetType().FullName} while processing blob {blob.Uri.AbsoluteUri}: \"{blobException.Message}\" - {blobException.StackTrace}");
+                                                    }
+                                                }
                                             }
+                                            while (blobEnumerationToken != null);
+                                        }
+                                        catch (Exception containerException)
+                                        {
+                                            log.LogError($"{containerException.GetType().FullName} while processing account {account.Name} container {container.Name}: \"{containerException.Message}\" - {containerException.StackTrace}");
                                         }
                                     }
-                                    while (blobEnumerationToken != null);
                                 }
+                                while (containerEnumerationToken != null);
                             }
-                            while (containerEnumerationToken != null);
+                            catch (Exception accountException)
+                            {
+                                log.LogError($"{accountException.GetType().FullName} while processing account {account.Name}: \"{accountException.Message}\" - {accountException.StackTrace}");
+                            }
                         }
                     }
                 }
