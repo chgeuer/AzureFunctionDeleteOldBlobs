@@ -1,5 +1,7 @@
 
 
+
+
 ## Assign a "managed service identity" (MSI) to the Function App
 
 ![MSI Setup][pictureMSI]
