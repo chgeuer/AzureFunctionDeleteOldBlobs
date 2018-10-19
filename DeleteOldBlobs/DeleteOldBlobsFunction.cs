@@ -15,6 +15,7 @@ namespace DeleteOldBlobsFunction
     using Microsoft.WindowsAzure.Storage.Auth;
     using Microsoft.WindowsAzure.Storage.Blob;
     using Microsoft.Extensions.Logging;
+    using Microsoft.Azure.Management.Resources;
 
     public static class DeleteOldBlobs
     {
@@ -26,9 +27,7 @@ namespace DeleteOldBlobsFunction
 
             try
             {
-                var azureServiceTokenProvider = new AzureServiceTokenProvider();
-                var msiArmTokenString = await azureServiceTokenProvider.GetAccessTokenAsync(resource: "https://management.core.windows.net/");
-                await ProcessAllSubscriptions(msiArmTokenString, log, ct);
+                await ProcessAllSubscriptions(log, ct);
             }
             catch (Exception ex)
             {
@@ -36,10 +35,17 @@ namespace DeleteOldBlobsFunction
             }
         }
 
-        private static async Task ProcessAllSubscriptions(string msiArmTokenString, ILogger log, CancellationToken ct)
+        private static Task<string> GetCredentialAsync(string resource)
         {
-            var subscriptionClient = new SubscriptionClient(credentials: new TokenCloudCredentials(token: msiArmTokenString));
+            var azureServiceTokenProvider = new AzureServiceTokenProvider();
+            return azureServiceTokenProvider.GetAccessTokenAsync(resource: resource);
+        }
 
+        private static async Task ProcessAllSubscriptions(ILogger log, CancellationToken ct)
+        {
+            string msiArmTokenString = await GetCredentialAsync(resource: "https://management.core.windows.net/");
+
+            var subscriptionClient = new SubscriptionClient(credentials: new TokenCloudCredentials(msiArmTokenString));
             string subscriptionContinuationToken = string.Empty;
             do
             {
@@ -61,26 +67,52 @@ namespace DeleteOldBlobsFunction
             var subscriptionCredential = new TokenCloudCredentials(subscriptionId: subscription.SubscriptionId, token: msiArmTokenString);
             log.LogInformation($"subscriptionCredential {subscriptionCredential.ToString()}");
 
-            var client = new StorageManagementClient(credentials: subscriptionCredential);
-            var storageAccountListResponse = await client.StorageAccounts.ListAsync(ct);
+            var resourceManagementClient = new ResourceManagementClient(credentials: subscriptionCredential);
+            // var resourceGroupListResult = await resourceManagementClient.ResourceGroups.ListAsync(new ResourceGroupListParameters { });
+            string nextLink = null;
+            do
+            {
+                var resourceGroupListResult = await resourceManagementClient.ResourceGroups.ListNextAsync(nextLink, ct);
+                foreach (var resourceGroupExtended in resourceGroupListResult.ResourceGroups)
+                {
+                    await ProcessResourceGroup(subscriptionCredential: subscriptionCredential, resourceGroupExtended: resourceGroupExtended, log: log, ct: ct);
+                }
+                nextLink = resourceGroupListResult.NextLink;
+            } while (!string.IsNullOrEmpty(nextLink));
+        }
+
+        private static async Task ProcessResourceGroup(TokenCloudCredentials subscriptionCredential, ResourceGroupExtended resourceGroupExtended, ILogger log, CancellationToken ct)
+        {
+            log.LogInformation($"Resource Group {resourceGroupExtended.Id}");
+
+            var storageManagementClient = new StorageManagementClient(credentials: subscriptionCredential);
+            var storageAccountListResponse = await storageManagementClient.StorageAccounts.ListByResourceGroupAsync(resourceGroupName: resourceGroupExtended.Name, cancellationToken: ct);
             foreach (var account in storageAccountListResponse.StorageAccounts)
             {
-                await ProcessStorageAccountAsync(account, log, ct);
+                var keys = await storageManagementClient.StorageAccounts.ListKeysAsync(resourceGroupName: resourceGroupExtended.Name, accountName: account.Name);
+                await ProcessStorageAccountAsync(account, keys, log, ct);
             }
         }
 
-        private static async Task ProcessStorageAccountAsync(StorageAccount account, ILogger log, CancellationToken ct)
+        private static async Task ProcessStorageAccountAsync(StorageAccount account, StorageAccountListKeysResponse keys, ILogger log, CancellationToken ct)
         {
             try
             {
                 log.LogInformation($"Found storage account: {account.Name}");
                 if (!IsBackupStorageAccount(account)) { return; }
 
-                var azureServiceTokenProvider = new AzureServiceTokenProvider();
-                var endpointSuffix = "core.windows.net";
-                var storageTokenString = await azureServiceTokenProvider.GetAccessTokenAsync(resource: $"https://{account.Name}.blob.{endpointSuffix}/");
-                var storageToken = new StorageCredentials(tokenCredential: new TokenCredential(initialToken: storageTokenString));
-                var storageAccount = new CloudStorageAccount(storageCredentials: storageToken, accountName: account.Name, endpointSuffix: endpointSuffix, useHttps: true);
+                //var azureServiceTokenProvider = new AzureServiceTokenProvider();
+                //var endpointSuffix = "core.windows.net";
+                //var storageTokenString = await azureServiceTokenProvider.GetAccessTokenAsync(resource: $"https://{account.Name}.blob.{endpointSuffix}/");
+                //var storageToken = new StorageCredentials(tokenCredential: new TokenCredential(initialToken: storageTokenString));
+                //var storageAccount = new CloudStorageAccount(storageCredentials: storageToken, accountName: account.Name, endpointSuffix: endpointSuffix, useHttps: true);
+
+                var storageAccount = new CloudStorageAccount(
+                    storageCredentials: new StorageCredentials(
+                        accountName: account.Name, 
+                        keyValue: keys.StorageAccountKeys.Key1), 
+                    useHttps: true);
+
                 var blobClient = storageAccount.CreateCloudBlobClient();
 
                 BlobContinuationToken containerEnumerationToken = null;
