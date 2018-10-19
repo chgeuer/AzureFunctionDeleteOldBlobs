@@ -3,19 +3,20 @@ namespace DeleteOldBlobsFunction
     using System;
     using System.Threading;
     using System.Threading.Tasks;
+
     using Microsoft.Azure;
-    using Microsoft.Azure.WebJobs;
-    using Microsoft.Azure.Subscriptions;
-    using Microsoft.Azure.Subscriptions.Models;
+    using Microsoft.Azure.Management.Resources;
+    using Microsoft.Azure.Management.Resources.Models;
     using Microsoft.Azure.Management.Storage;
     using Microsoft.Azure.Management.Storage.Models;
-    using Microsoft.Azure.Management.Resources.Models;
     using Microsoft.Azure.Services.AppAuthentication;
+    using Microsoft.Azure.Subscriptions;
+    using Microsoft.Azure.Subscriptions.Models;
+    using Microsoft.Azure.WebJobs;
+    using Microsoft.Extensions.Logging;
     using Microsoft.WindowsAzure.Storage;
     using Microsoft.WindowsAzure.Storage.Auth;
     using Microsoft.WindowsAzure.Storage.Blob;
-    using Microsoft.Extensions.Logging;
-    using Microsoft.Azure.Management.Resources;
 
     public static class DeleteOldBlobs
     {
@@ -46,21 +47,9 @@ namespace DeleteOldBlobsFunction
             string msiArmTokenString = await GetCredentialAsync(resource: "https://management.core.windows.net/");
 
             var subscriptionClient = new SubscriptionClient(credentials: new TokenCloudCredentials(msiArmTokenString));
-            SubscriptionListResult subscriptionListResult = await subscriptionClient.Subscriptions.ListAsync(ct);
-            string subscriptionContinuationToken = subscriptionListResult.NextLink;
-            foreach (var subscription in subscriptionListResult.Subscriptions)
-            {
-                await ProcessSubscriptionAsync(subscription, msiArmTokenString, log, ct);
-            }
-            while (!string.IsNullOrEmpty(subscriptionContinuationToken))
-            {
-                subscriptionListResult = await subscriptionClient.Subscriptions.ListNextAsync(nextLink: subscriptionContinuationToken, cancellationToken: ct);
-                subscriptionContinuationToken = subscriptionListResult.NextLink;
-                foreach (var subscription in subscriptionListResult.Subscriptions)
-                {
-                    await ProcessSubscriptionAsync(subscription, msiArmTokenString, log, ct);
-                }
-            }
+            await subscriptionClient.IterateSubscriptions(ct, 
+                subscription => ProcessSubscriptionAsync(
+                    subscription, msiArmTokenString, log, ct));
         }
 
         private static async Task ProcessSubscriptionAsync(Subscription subscription, string msiArmTokenString, ILogger log, CancellationToken ct)
@@ -72,21 +61,9 @@ namespace DeleteOldBlobsFunction
             log.LogInformation($"subscriptionCredential {subscriptionCredential.ToString()}");
 
             var resourceManagementClient = new ResourceManagementClient(credentials: subscriptionCredential);
-            ResourceGroupListResult resourceGroupListResult = await resourceManagementClient.ResourceGroups.ListAsync(new ResourceGroupListParameters { });
-            string nextLink = resourceGroupListResult.NextLink;
-            foreach (var resourceGroupExtended in resourceGroupListResult.ResourceGroups)
-            {
-                await ProcessResourceGroup(subscriptionCredential: subscriptionCredential, resourceGroupExtended: resourceGroupExtended, log: log, ct: ct);
-            }
-            while (!string.IsNullOrEmpty(nextLink))
-            {
-                resourceGroupListResult = await resourceManagementClient.ResourceGroups.ListNextAsync(nextLink, ct);
-                nextLink = resourceGroupListResult.NextLink;
-                foreach (var resourceGroupExtended in resourceGroupListResult.ResourceGroups)
-                {
-                    await ProcessResourceGroup(subscriptionCredential: subscriptionCredential, resourceGroupExtended: resourceGroupExtended, log: log, ct: ct);
-                }
-            } 
+            await resourceManagementClient.IterateResourceGroups(ct, 
+                resourceGroupExtended => ProcessResourceGroup(
+                    subscriptionCredential: subscriptionCredential, resourceGroupExtended: resourceGroupExtended, log: log, ct: ct));
         }
 
         private static async Task ProcessResourceGroup(TokenCloudCredentials subscriptionCredential, ResourceGroupExtended resourceGroupExtended, ILogger log, CancellationToken ct)
@@ -117,23 +94,12 @@ namespace DeleteOldBlobsFunction
 
                 var storageAccount = new CloudStorageAccount(
                     storageCredentials: new StorageCredentials(
-                        accountName: account.Name, 
-                        keyValue: keys.StorageAccountKeys.Key1), 
+                        accountName: account.Name,
+                        keyValue: keys.StorageAccountKeys.Key1),
                     useHttps: true);
 
-                var blobClient = storageAccount.CreateCloudBlobClient();
-
-                BlobContinuationToken containerEnumerationToken = null;
-                do
-                {
-                    var response = await blobClient.ListContainersSegmentedAsync(continuationToken: containerEnumerationToken, cancellationToken: ct);
-                    foreach (var container in response.Results)
-                    {
-                        await ProcessContainerAsync(account, blobClient, container, log, ct);
-                    }
-                    containerEnumerationToken = response.ContinuationToken;
-                }
-                while (containerEnumerationToken != null);
+                CloudBlobClient blobClient = storageAccount.CreateCloudBlobClient();
+                await blobClient.IterateContainers(ct, container => ProcessContainerAsync(account, blobClient, container, log, ct));
             }
             catch (Exception accountException)
             {
@@ -149,17 +115,7 @@ namespace DeleteOldBlobsFunction
             try
             {
                 CloudBlobContainer containerReference = blobClient.GetContainerReference(containerName: container.Name);
-                BlobContinuationToken blobEnumerationToken = null;
-                do
-                {
-                    var blobResponse = await containerReference.ListBlobsSegmentedAsync(currentToken: blobEnumerationToken, cancellationToken: ct);
-                    foreach (var blob in blobResponse.Results)
-                    {
-                        await DeleteBlobAsync(blobClient, blob, log, ct);
-                    }
-                    blobEnumerationToken = blobResponse.ContinuationToken;
-                }
-                while (blobEnumerationToken != null);
+                await containerReference.IterateBlobs(ct, blob => DeleteBlobAsync(blobClient, blob, log, ct));
             }
             catch (Exception containerException)
             {
@@ -205,6 +161,77 @@ namespace DeleteOldBlobsFunction
             var msg = shouldBeDeleted ? "should be deleted" : "should not be deleted";
             log.LogInformation($"{blob.Uri.AbsoluteUri} is {(int)age.Days} days old and {msg}");
             return shouldBeDeleted;
+        }
+    }
+
+    public static class MyIteratorExtensions
+    {
+        public static async Task IterateSubscriptions(this SubscriptionClient subscriptionClient, CancellationToken ct, Func<Subscription, Task> action)
+        {
+            SubscriptionListResult subscriptionListResult = await subscriptionClient.Subscriptions.ListAsync(ct);
+            string subscriptionContinuationToken = subscriptionListResult.NextLink;
+            foreach (var subscription in subscriptionListResult.Subscriptions)
+            {
+                await action(subscription);
+            }
+            while (!string.IsNullOrEmpty(subscriptionContinuationToken))
+            {
+                subscriptionListResult = await subscriptionClient.Subscriptions.ListNextAsync(nextLink: subscriptionContinuationToken, cancellationToken: ct);
+                subscriptionContinuationToken = subscriptionListResult.NextLink;
+                foreach (var subscription in subscriptionListResult.Subscriptions)
+                {
+                    await action(subscription);
+                }
+            }
+        }
+
+        public static async Task IterateResourceGroups(this ResourceManagementClient resourceManagementClient, CancellationToken ct, Func<ResourceGroupExtended, Task> action)
+        {
+            ResourceGroupListResult resourceGroupListResult = await resourceManagementClient.ResourceGroups.ListAsync(new ResourceGroupListParameters { });
+            string nextLink = resourceGroupListResult.NextLink;
+            foreach (var resourceGroupExtended in resourceGroupListResult.ResourceGroups)
+            {
+                await action(resourceGroupExtended);
+            }
+            while (!string.IsNullOrEmpty(nextLink))
+            {
+                resourceGroupListResult = await resourceManagementClient.ResourceGroups.ListNextAsync(nextLink, ct);
+                nextLink = resourceGroupListResult.NextLink;
+                foreach (var resourceGroupExtended in resourceGroupListResult.ResourceGroups)
+                {
+                    await action(resourceGroupExtended);
+                }
+            }
+        }
+
+        public static async Task IterateContainers(this CloudBlobClient blobClient, CancellationToken ct, Func<CloudBlobContainer, Task> action)
+        {
+            BlobContinuationToken containerEnumerationToken = null;
+            do
+            {
+                var response = await blobClient.ListContainersSegmentedAsync(continuationToken: containerEnumerationToken, cancellationToken: ct);
+                foreach (var container in response.Results)
+                {
+                    await action(container);
+                }
+                containerEnumerationToken = response.ContinuationToken;
+            }
+            while (containerEnumerationToken != null);
+        }
+
+        public static async Task IterateBlobs(this CloudBlobContainer containerReference, CancellationToken ct, Func<IListBlobItem, Task> action)
+        {
+            BlobContinuationToken blobEnumerationToken = null;
+            do
+            {
+                var blobResponse = await containerReference.ListBlobsSegmentedAsync(currentToken: blobEnumerationToken, cancellationToken: ct);
+                foreach (var blob in blobResponse.Results)
+                {
+                    await action(blob);
+                }
+                blobEnumerationToken = blobResponse.ContinuationToken;
+            }
+            while (blobEnumerationToken != null);
         }
     }
 }
