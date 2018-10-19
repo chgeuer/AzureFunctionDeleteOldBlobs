@@ -46,17 +46,21 @@ namespace DeleteOldBlobsFunction
             string msiArmTokenString = await GetCredentialAsync(resource: "https://management.core.windows.net/");
 
             var subscriptionClient = new SubscriptionClient(credentials: new TokenCloudCredentials(msiArmTokenString));
-            string subscriptionContinuationToken = string.Empty;
-            do
+            SubscriptionListResult subscriptionListResult = await subscriptionClient.Subscriptions.ListAsync(ct);
+            string subscriptionContinuationToken = subscriptionListResult.NextLink;
+            foreach (var subscription in subscriptionListResult.Subscriptions)
             {
-                var subscriptionListResult = await subscriptionClient.Subscriptions.ListNextAsync(nextLink: subscriptionContinuationToken, cancellationToken: ct);
+                await ProcessSubscriptionAsync(subscription, msiArmTokenString, log, ct);
+            }
+            while (!string.IsNullOrEmpty(subscriptionContinuationToken))
+            {
+                subscriptionListResult = await subscriptionClient.Subscriptions.ListNextAsync(nextLink: subscriptionContinuationToken, cancellationToken: ct);
+                subscriptionContinuationToken = subscriptionListResult.NextLink;
                 foreach (var subscription in subscriptionListResult.Subscriptions)
                 {
                     await ProcessSubscriptionAsync(subscription, msiArmTokenString, log, ct);
                 }
-                subscriptionContinuationToken = subscriptionListResult.NextLink;
             }
-            while (!string.IsNullOrEmpty(subscriptionContinuationToken));
         }
 
         private static async Task ProcessSubscriptionAsync(Subscription subscription, string msiArmTokenString, ILogger log, CancellationToken ct)
@@ -68,17 +72,21 @@ namespace DeleteOldBlobsFunction
             log.LogInformation($"subscriptionCredential {subscriptionCredential.ToString()}");
 
             var resourceManagementClient = new ResourceManagementClient(credentials: subscriptionCredential);
-            // var resourceGroupListResult = await resourceManagementClient.ResourceGroups.ListAsync(new ResourceGroupListParameters { });
-            string nextLink = null;
-            do
+            ResourceGroupListResult resourceGroupListResult = await resourceManagementClient.ResourceGroups.ListAsync(new ResourceGroupListParameters { });
+            string nextLink = resourceGroupListResult.NextLink;
+            foreach (var resourceGroupExtended in resourceGroupListResult.ResourceGroups)
             {
-                var resourceGroupListResult = await resourceManagementClient.ResourceGroups.ListNextAsync(nextLink, ct);
+                await ProcessResourceGroup(subscriptionCredential: subscriptionCredential, resourceGroupExtended: resourceGroupExtended, log: log, ct: ct);
+            }
+            while (!string.IsNullOrEmpty(nextLink))
+            {
+                resourceGroupListResult = await resourceManagementClient.ResourceGroups.ListNextAsync(nextLink, ct);
+                nextLink = resourceGroupListResult.NextLink;
                 foreach (var resourceGroupExtended in resourceGroupListResult.ResourceGroups)
                 {
                     await ProcessResourceGroup(subscriptionCredential: subscriptionCredential, resourceGroupExtended: resourceGroupExtended, log: log, ct: ct);
                 }
-                nextLink = resourceGroupListResult.NextLink;
-            } while (!string.IsNullOrEmpty(nextLink));
+            } 
         }
 
         private static async Task ProcessResourceGroup(TokenCloudCredentials subscriptionCredential, ResourceGroupExtended resourceGroupExtended, ILogger log, CancellationToken ct)
